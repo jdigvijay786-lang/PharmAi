@@ -1,0 +1,297 @@
+# 🚀 Installation Guide: Ollama + Flask for PharmAI
+
+## Prerequisites
+
+Before starting, ensure you have:
+
+* Python 3.10 or higher installed
+* Git installed
+* Internet connection for downloading models
+* At least 8 GB RAM (16 GB recommended for larger models)
+
+---
+
+# Step 1: Install Ollama
+
+## Windows
+
+1. Visit the official Ollama website:
+
+   * https://ollama.com/download
+
+2. Download the Windows installer.
+
+3. Run the installer and complete the setup.
+
+4. Open Command Prompt and verify installation:
+
+```bash
+ollama --version
+```
+
+---
+
+## macOS
+
+Install using Homebrew:
+
+```bash
+brew install ollama
+```
+
+Verify installation:
+
+```bash
+ollama --version
+```
+
+---
+
+## Linux
+
+Run:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Verify installation:
+
+```bash
+ollama --version
+```
+
+---
+
+# Step 2: Download an AI Model
+
+Pull a model from the Ollama library.
+
+Example: Llama 3
+
+```bash
+ollama pull llama3
+```
+
+Other popular models:
+
+```bash
+ollama pull mistral
+```
+
+```bash
+ollama pull gemma3
+```
+
+```bash
+ollama pull phi4
+```
+
+Test the model:
+
+```bash
+ollama run llama3
+```
+
+You should now be able to chat with the model locally.
+
+---
+
+# Step 3: Install Flask
+
+Create a project folder:
+
+```bash
+mkdir PharmAI
+cd PharmAI
+```
+
+Create a virtual environment:
+
+## Windows
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+## macOS/Linux
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Install Flask:
+
+```bash
+pip install flask
+```
+
+Install Requests:
+
+```bash
+pip install requests
+```
+
+Verify installation:
+
+```bash
+pip list
+```
+
+You should see:
+
+```text
+Flask
+requests
+```
+
+---
+
+# Step 4: Create Flask Backend
+
+Create a file named:
+
+```text
+app.py
+```
+
+Paste the following code:
+
+```python
+from flask import Flask, request, jsonify
+import requests
+
+app = Flask(__name__)
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.json
+
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": "llama3",
+            "prompt": data["message"],
+            "stream": False
+        }
+    )
+
+    return jsonify(response.json())
+
+if __name__ == "__main__":
+    app.run(debug=True)
+```
+
+---
+
+# Step 5: Start Ollama
+
+Open a terminal and run:
+
+```bash
+ollama serve
+```
+
+Ollama will start on:
+
+```text
+http://localhost:11434
+```
+
+---
+
+# Step 6: Start Flask
+
+Open another terminal:
+
+```bash
+python app.py
+```
+
+Flask will start on:
+
+```text
+http://127.0.0.1:5000
+```
+
+---
+
+# Step 7: Test the API
+
+Using cURL:
+
+```bash
+curl -X POST http://127.0.0.1:5000/chat \
+-H "Content-Type: application/json" \
+-d "{\"message\":\"Explain aspirin mechanism of action\"}"
+```
+
+Expected Response:
+
+```json
+{
+  "response": "Aspirin works by inhibiting cyclooxygenase..."
+}
+```
+
+---
+
+# Step 8: Install Additional Dependencies (Optional)
+
+For PharmAI you may also want:
+
+```bash
+pip install flask-cors
+```
+
+```bash
+pip install python-dotenv
+```
+
+```bash
+pip install gunicorn
+```
+
+```bash
+pip install pymongo
+```
+
+```bash
+pip install sqlalchemy
+```
+
+---
+
+# Recommended Models for PharmAI
+
+| Model       | RAM Required | Use Case               |
+| ----------- | ------------ | ---------------------- |
+| llama3      | 8 GB+        | General pharmacy Q&A   |
+| mistral     | 8 GB+        | Fast responses         |
+| gemma3      | 8 GB+        | Educational assistant  |
+| phi4        | 8 GB+        | Lightweight deployment |
+| deepseek-r1 | 16 GB+       | Advanced reasoning     |
+
+---
+
+# Production Deployment
+
+For production:
+
+```bash
+gunicorn app:app
+```
+
+Behind:
+
+* Nginx
+* Docker
+* Railway
+* Render
+* VPS (Ubuntu)
+
+This setup provides a fully local AI backend where Flask handles API requests and Ollama runs the language model on your machine without requiring external AI APIs.

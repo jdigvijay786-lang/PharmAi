@@ -816,12 +816,39 @@ function generateDiagram(){
     renderMermaid(data.code||'');
   }).catch(function(){setLoading('diagBtn',false);document.getElementById('mermaid-output').innerHTML='<div class="diag-err">Cannot connect to server.</div>';});
 }
-function renderMermaid(code){
+function renderMermaid(code, retried){
   if(!code.trim()) return;
   var out=document.getElementById('mermaid-output');
   out.innerHTML='<div id="mermaid-render"></div>';
-  mermaid.render('mermaid-render',code).then(function(r){out.innerHTML=r.svg;}).catch(function(e){
-    out.innerHTML='<div class="diag-err">Diagram error:\n'+escHtml(String(e))+'</div>';
+  // Use a unique ID each time to avoid mermaid caching issues
+  var uid='mr'+Date.now();
+  mermaid.render(uid, code).then(function(r){
+    out.innerHTML=r.svg;
+  }).catch(function(e){
+    if(!retried){
+      // Try auto-fixing: force a simple flowchart from the code
+      var lines=code.split('\n').filter(function(l){return l.trim()&&!l.trim().startsWith('%%');});
+      var fixed=lines.join('\n');
+      // If it looks like a sequence diagram with bad participant, rebuild it simply
+      if(code.startsWith('sequenceDiagram')){
+        // Extract only valid ->> lines and rebuild
+        var msgs=lines.filter(function(l){return l.includes('->>');});
+        var parts=new Set();
+        msgs.forEach(function(m){var s=m.trim().split('->>');if(s.length>=2){parts.add(s[0].trim());parts.add(s[1].split(':')[0].trim());}});
+        var rebuilt='sequenceDiagram\n';
+        parts.forEach(function(p){rebuilt+='    participant '+p+'\n';});
+        rebuilt+=msgs.map(function(m){return '    '+m.trim();}).join('\n');
+        renderMermaid(rebuilt, true);
+        return;
+      }
+    }
+    // Show friendly error with the code visible for manual editing
+    out.innerHTML=
+      '<div style="padding:16px">' +
+      '<div style="color:var(--red);font-family:\'DM Mono\',monospace;font-size:12px;margin-bottom:10px">'+
+      '⚠️ Diagram could not render. Edit the code on the left and click ▶ Render to try again.</div>'+
+      '<div style="color:var(--muted);font-size:11px;font-family:\'DM Mono\',monospace;white-space:pre-wrap;background:var(--surface2);padding:10px;border-radius:6px;max-height:200px;overflow:auto">'+
+      escHtml(String(e).split('\n')[0])+'</div></div>';
   });
 }
 
@@ -1046,24 +1073,201 @@ def chat():
     return Response(stream_with_context(generate()), mimetype="text/event-stream",
                     headers={"X-Accel-Buffering":"no","Cache-Control":"no-cache"})
 
+DIAGRAM_EXAMPLES = {
+    "flowchart": """flowchart TD
+    A[Drug Ingested] --> B[Absorption in GI Tract]
+    B --> C[Distribution via Blood]
+    C --> D[Metabolism in Liver]
+    D --> E[Excretion via Kidneys]""",
+
+    "sequence": """sequenceDiagram
+    participant P as Patient
+    participant D as Doctor
+    participant Ph as Pharmacist
+    D->>P: Prescribes Drug
+    P->>Ph: Submits Prescription
+    Ph->>P: Dispenses Medication
+    P->>P: Takes Medication""",
+
+    "graph": """graph LR
+    A[Beta Blockers] --> B[Atenolol]
+    A --> C[Metoprolol]
+    A --> D[Propranolol]
+    B --> E[Cardioselective]
+    C --> E
+    D --> F[Non-selective]""",
+
+    "pie": """pie title Drug Classes in Hospital
+    "Antibiotics" : 30
+    "Analgesics" : 25
+    "Antihypertensives" : 20
+    "Antidiabetics" : 15
+    "Others" : 10""",
+
+    "timeline": """timeline
+    title Drug Development Timeline
+    1928 : Penicillin discovered
+    1940 : Penicillin purified
+    1945 : Mass production begins
+    1960 : Resistance emerges
+    1980 : New antibiotics developed"""
+}
+
+def clean_mermaid(raw):
+    """Strip markdown fences and fix common Mermaid syntax issues."""
+    code = raw.strip()
+
+    # Remove ```mermaid or ``` fences
+    if "```" in code:
+        lines = code.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        code = "\n".join(lines).strip()
+
+    # Remove leading/trailing quotes
+    code = code.strip('"').strip("'").strip()
+
+    # Fix: 'flowchart TB' → 'flowchart TD'
+    code = re.sub(r'^flowchart\s+TB\b', 'flowchart TD', code, flags=re.MULTILINE)
+
+    # Fix: 'sequenceDiagram\nparticipant X Y Z' (space in participant alias causes parse error)
+    # Rewrite participants with aliases to safe single-word aliases
+    def fix_participant(m):
+        name = m.group(1).strip()
+        alias = re.sub(r'\s+', '_', name)[:12]
+        return f"participant {alias} as {name}"
+
+    # Fix participant lines that have long names without 'as' keyword
+    def fix_seq_lines(code):
+        lines = code.split("\n")
+        fixed = []
+        for line in lines:
+            stripped = line.strip()
+            # participant Student Teacher → participant Student as Student
+            if stripped.startswith("participant "):
+                parts = stripped.split()
+                if len(parts) == 2:
+                    # simple: participant Name — fine
+                    fixed.append(line)
+                elif len(parts) >= 3 and parts[2].lower() != "as":
+                    # participant First Second → participant First as First_Second
+                    name = " ".join(parts[1:])
+                    alias = parts[1]
+                    fixed.append(f"    participant {alias} as {name}")
+                else:
+                    fixed.append(line)
+            else:
+                fixed.append(line)
+        return "\n".join(fixed)
+
+    if code.startswith("sequenceDiagram"):
+        code = fix_seq_lines(code)
+
+    # Fix: node labels with parentheses — replace () with [] in flowchart nodes
+    if code.startswith("flowchart") or code.startswith("graph"):
+        # e.g. A(Label) → A[Label]  only for standalone node defs
+        code = re.sub(r'\b([A-Z]\d*)\(([^)]{1,40})\)', r'\1[\2]', code)
+
+    # Remove any line that is just prose/explanation (doesn't look like Mermaid)
+    if code.startswith("flowchart") or code.startswith("graph"):
+        lines = code.split("\n")
+        clean_lines = []
+        for line in lines:
+            s = line.strip()
+            # Keep blank lines, keyword lines, and lines with --> or ---
+            if not s or "-->" in s or "---" in s or s.startswith("flowchart") \
+               or s.startswith("graph") or re.match(r'^[A-Za-z0-9_]+[\[\({]', s) \
+               or re.match(r'^\w+\s*--', s) or s.startswith("%%"):
+                clean_lines.append(line)
+        code = "\n".join(clean_lines)
+
+    # Remove lines with only whitespace
+    lines = [l.rstrip() for l in code.split("\n")]
+    code = "\n".join(lines).strip()
+    return code
+
+def build_diagram_prompt(prompt, dtype):
+    example = DIAGRAM_EXAMPLES.get(dtype, DIAGRAM_EXAMPLES["flowchart"])
+    type_rules = {
+        "flowchart": (
+            "Use 'flowchart TD' on the first line (top-down). "
+            "Node labels go inside square brackets like A[Label]. "
+            "Arrows use --> between nodes. "
+            "Keep labels under 5 words. No parentheses in labels."
+        ),
+        "sequence": (
+            "Use 'sequenceDiagram' alone on the first line. "
+            "Declare EVERY participant with exactly this format: 'participant A as Patient' "
+            "where A is a single short word with NO spaces. "
+            "Message arrows: 'A->>B: Message text'. "
+            "Never use spaces in participant short names. "
+            "Wrong: 'participant Student Teacher'. Right: 'participant St as Student'."
+        ),
+        "graph": (
+            "Use 'graph LR' on the first line (left to right). "
+            "Node labels go inside square brackets like A[Label]. "
+            "Arrows use --> between nodes. "
+            "Keep labels short and simple."
+        ),
+        "pie": (
+            "Use 'pie title Your Title' on the first line. "
+            "Each slice: '\"Label\" : number' — label in quotes, number is a plain integer. "
+            "Do not use percentages or % signs."
+        ),
+        "timeline": (
+            "Use 'timeline' on the first line. "
+            "Use 'title Your Title' on the second line. "
+            "Each entry: 'Year : Event description'. "
+            "Keep event descriptions short."
+        )
+    }
+    rules = type_rules.get(dtype, type_rules["flowchart"])
+    return (
+        f"Create a Mermaid.js {dtype} diagram for pharmacy students about: {prompt}\n\n"
+        f"STRICT RULES:\n"
+        f"1. {rules}\n"
+        f"2. Output ONLY the raw Mermaid code — no explanation, no markdown fences (no ```), no extra text.\n"
+        f"3. Start your response directly with the diagram type keyword.\n"
+        f"4. Keep it simple — max 10 nodes/steps.\n\n"
+        f"Example of valid {dtype} output:\n{example}\n\n"
+        f"Now generate the diagram about: {prompt}"
+    )
+
 @app.route("/diagram", methods=["POST"])
 def diagram():
     data   = request.get_json(force=True, silent=True) or {}
     prompt = data.get("prompt","").strip()
     dtype  = data.get("type","flowchart")
-    hints  = {"flowchart":"Use flowchart TD syntax.","sequence":"Use sequenceDiagram syntax.",
-              "graph":"Use graph LR syntax.","pie":"Use pie chart syntax.","timeline":"Use timeline syntax."}
-    full   = ("Generate a Mermaid.js diagram for pharmacy students about: " + prompt
-              + ". " + hints.get(dtype,"Use flowchart TD.") + " Return ONLY raw Mermaid code.")
-    try:
-        resp = ollama_complete(DIAGRAM_PROMPT, full)
-        code = extract_text(resp)
-        code = code.strip()
-        if code.startswith("```"):
-            code = "\n".join(l for l in code.split("\n") if not l.strip().startswith("```")).strip()
-        return {"code": code}
-    except Exception as e:
-        return {"error": str(e)}, 500
+    if not prompt:
+        return {"error": "No prompt provided"}, 400
+
+    full_prompt = build_diagram_prompt(prompt, dtype)
+
+    # Try up to 2 times
+    last_error = ""
+    for attempt in range(2):
+        try:
+            resp = ollama_complete(DIAGRAM_PROMPT, full_prompt)
+            code = clean_mermaid(extract_text(resp))
+
+            # Basic validation — must start with a known keyword
+            valid_starts = ["flowchart", "graph", "sequenceDiagram",
+                            "pie", "timeline", "classDiagram", "stateDiagram"]
+            first_word = code.split()[0] if code.split() else ""
+            if not any(code.startswith(k) for k in valid_starts):
+                # Prepend correct type if missing
+                type_keywords = {
+                    "flowchart":"flowchart TD",
+                    "sequence":"sequenceDiagram",
+                    "graph":"graph LR",
+                    "pie":"pie",
+                    "timeline":"timeline"
+                }
+                code = type_keywords.get(dtype, "flowchart TD") + "\n" + code
+            return {"code": code}
+        except Exception as e:
+            last_error = str(e)
+
+    return {"error": "Could not generate diagram: " + last_error}, 500
 
 @app.route("/summarise", methods=["POST"])
 def summarise():
@@ -1095,21 +1299,78 @@ def flashcards():
     count = min(int(data.get("count",8)), 20)
     if not text:
         return {"error":"No text provided"}, 400
-    prompt = (f"You are a pharmacy flashcard maker. Create exactly {count} flashcards from this text. "
-              "Return ONLY a JSON array like: [{\"q\":\"question\",\"a\":\"answer\"},...] "
-              "No explanation, no markdown, just the raw JSON array.\n\nText:\n" + text[:3000])
+
+    prompt = (
+        f"Create exactly {count} pharmacy flashcards.\n"
+        f"Output ONLY a JSON array. No intro text, no explanation, no markdown fences.\n"
+        f"Format: [{{'q':'Question here','a':'Answer here'}},...]\n"
+        f"Each object must have exactly two keys: 'q' and 'a'.\n\n"
+        f"Topic/text:\n{text[:2500]}"
+    )
     try:
         resp = ollama_complete(SYSTEM_PROMPT, prompt)
         raw  = extract_text(resp).strip()
-        raw  = re.sub(r'^```[a-z]*\n?','',raw); raw = re.sub(r'\n?```$','',raw)
-        start = raw.find('['); end = raw.rfind(']')
-        if start != -1 and end != -1:
-            cards = json.loads(raw[start:end+1])
-        else:
+
+        # Strategy 1: strip markdown fences
+        raw = re.sub(r'```[a-zA-Z]*', '', raw).strip()
+        raw = re.sub(r'```', '', raw).strip()
+
+        # Strategy 2: find the JSON array bounds
+        start = raw.find('[')
+        end   = raw.rfind(']')
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start:end+1]
+
+        # Strategy 3: try direct parse
+        try:
             cards = json.loads(raw)
-        return {"cards": cards}
+            if isinstance(cards, list):
+                return {"cards": cards}
+        except json.JSONDecodeError:
+            pass
+
+        # Strategy 4: extract individual {...} objects with regex
+        objects = re.findall(r'\{[^{}]+\}', raw, re.DOTALL)
+        cards = []
+        for obj in objects:
+            try:
+                # normalise keys: q/question → q, a/answer → a
+                parsed = json.loads(obj)
+                q = parsed.get('q') or parsed.get('question') or parsed.get('Q') or ''
+                a = parsed.get('a') or parsed.get('answer') or parsed.get('A') or ''
+                if q and a:
+                    cards.append({'q': q, 'a': a})
+            except Exception:
+                # Strategy 5: regex fallback for "q": "..." "a": "..."
+                qm = re.search(r'["\'](?:q|question|Q)["\']:\s*["\']([^"\']+)["\']', obj)
+                am = re.search(r'["\'](?:a|answer|A)["\']:\s*["\']([^"\']+)["\']', obj)
+                if qm and am:
+                    cards.append({'q': qm.group(1), 'a': am.group(1)})
+
+        if cards:
+            return {"cards": cards}
+
+        # Strategy 6: ask AI again with stricter instructions
+        strict_prompt = (
+            f"Output ONLY a valid JSON array with {count} objects.\n"
+            f"Each object: {{\"q\":\"question\",\"a\":\"answer\"}}\n"
+            f"Do NOT include any text before or after the array.\n"
+            f"Start your response with [ and end with ].\n\n"
+            f"Topic: {text[:1000]}"
+        )
+        resp2 = ollama_complete(SYSTEM_PROMPT, strict_prompt)
+        raw2  = extract_text(resp2).strip()
+        raw2  = re.sub(r'```[a-zA-Z]*', '', raw2).strip()
+        s2 = raw2.find('['); e2 = raw2.rfind(']')
+        if s2 != -1 and e2 > s2:
+            cards2 = json.loads(raw2[s2:e2+1])
+            if isinstance(cards2, list) and cards2:
+                return {"cards": cards2}
+
+        return {"error": "Could not generate flashcards. Try a shorter or more specific topic."}, 500
+
     except Exception as e:
-        return {"error": "Could not parse flashcards: " + str(e)}, 500
+        return {"error": "Flashcard error: " + str(e)}, 500
 
 @app.route("/mnemonic", methods=["POST"])
 def mnemonic():
